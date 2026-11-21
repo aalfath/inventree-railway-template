@@ -1,0 +1,66 @@
+# Caddy in front of InvenTree, adapted from upstream's contrib/container/Caddyfile.
+# Railway's edge terminates TLS, so Caddy only speaks plain HTTP on $PORT.
+{
+	admin off
+	auto_https off
+	persist_config off
+	servers {
+		# Requests only reach the container through Railway's proxy.
+		trusted_proxies static 0.0.0.0/0 ::/0
+	}
+}
+
+(cors-headers) {
+	header Allow GET,HEAD,OPTIONS
+	header Access-Control-Allow-Origin *
+	header Access-Control-Allow-Methods GET,HEAD,OPTIONS
+	header Access-Control-Allow-Headers Authorization,Content-Type,User-Agent,traceparent
+
+	@cors_preflight{args[0]} method OPTIONS
+
+	handle @cors_preflight{args[0]} {
+		respond "" 204
+	}
+}
+
+:{$PORT:8080} {
+	encode gzip
+
+	request_body {
+		max_size 100MB
+	}
+
+	# Health check: Railway calls it with its own Host header, so send the
+	# site's host name, which Django's ALLOWED_HOSTS accepts.
+	handle /api/system/health/ {
+		reverse_proxy 127.0.0.1:8000 {
+			header_up Host {$INVENTREE_SITE_HOST}
+			header_up X-Forwarded-Host {$INVENTREE_SITE_HOST}
+		}
+	}
+
+	handle_path /static/* {
+		import cors-headers static
+
+		root * {$INVENTREE_STATIC_ROOT}
+		file_server
+	}
+
+	# Uploaded files: only for signed-in users (checked by InvenTree's /auth/).
+	handle_path /media/* {
+		import cors-headers media
+
+		root * {$INVENTREE_MEDIA_ROOT}
+		file_server
+
+		header Content-Disposition attachment
+
+		forward_auth 127.0.0.1:8000 {
+			uri /auth/
+		}
+	}
+
+	handle {
+		reverse_proxy 127.0.0.1:8000
+	}
+}
