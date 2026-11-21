@@ -64,8 +64,16 @@ finally:
 PY
 cd "${INVENTREE_HOME:-/home/inventree}"
 
-echo "Collecting static files..."
-invoke static
+# Collect static files once per image version (takes about a minute), and
+# again whenever the template version changes.
+marker="${INVENTREE_STATIC_ROOT}/.railway-static-version"
+if [[ "$(cat "$marker" 2>/dev/null || true)" != "${INVENTREE_TEMPLATE_VERSION:-unknown}" ]]; then
+  echo "Collecting static files..."
+  invoke static
+  echo "${INVENTREE_TEMPLATE_VERSION:-unknown}" > "$marker"
+else
+  echo "Static files already collected for ${INVENTREE_TEMPLATE_VERSION:-unknown}; skipping."
+fi
 
 # Start the three processes.
 gunicorn -c ./gunicorn.conf.py InvenTree.wsgi \
