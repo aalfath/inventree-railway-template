@@ -29,15 +29,25 @@ site_host="${INVENTREE_SITE_URL#*://}"
 site_host="${site_host%%/*}"
 export INVENTREE_SITE_HOST="${site_host%%:*}"
 
+version="${INVENTREE_TEMPLATE_VERSION:-unknown}"
+marker="${INVENTREE_STATIC_ROOT}/.railway-static-version"
+first_start=false
+[[ "$(cat "$marker" 2>/dev/null || true)" != "$version" ]] && first_start=true
+
 cd "${INVENTREE_HOME:-/home/inventree}"
 
-# While the setup steps below run, a placeholder server answers the health
-# check, so a slow first start (fresh database) never hits Railway's
-# health-check timeout.
-caddy run --adapter caddyfile --config /etc/inventree-railway/Caddyfile.setup &
-setup_pid=$!
+# On the first start of this version (fresh volume or an upgrade), migrations
+# and static collection take a few minutes. A placeholder server answers the
+# health check meanwhile, so the deploy never hits Railway's health-check
+# timeout. On later restarts the health check waits for the real app instead,
+# so a redeploy keeps the old deployment serving until the new one is ready.
+setup_pid=""
+if $first_start; then
+  caddy run --adapter caddyfile --config /etc/inventree-railway/Caddyfile.setup &
+  setup_pid=$!
+fi
 
-echo "InvenTree ${INVENTREE_TEMPLATE_VERSION:-}: waiting for the database..."
+echo "InvenTree ${version}: waiting for the database..."
 invoke wait
 
 echo "Running database migrations..."
@@ -70,22 +80,16 @@ finally:
 PY
 cd "${INVENTREE_HOME:-/home/inventree}"
 
-# Collect static files once per image version (takes about a minute), and
-# again whenever the template version changes.
-marker="${INVENTREE_STATIC_ROOT}/.railway-static-version"
-if [[ "$(cat "$marker" 2>/dev/null || true)" != "${INVENTREE_TEMPLATE_VERSION:-unknown}" ]]; then
+# Collect static files once per version (takes about a minute).
+if $first_start; then
   echo "Collecting static files..."
   invoke static
-  echo "${INVENTREE_TEMPLATE_VERSION:-unknown}" > "$marker"
+  echo "$version" > "$marker"
 else
-  echo "Static files already collected for ${INVENTREE_TEMPLATE_VERSION:-unknown}; skipping."
+  echo "Static files already collected for ${version}; skipping."
 fi
 
-# Stop the placeholder server before the real one takes the port.
-kill -TERM "$setup_pid" 2>/dev/null || true
-wait "$setup_pid" 2>/dev/null || true
-
-# Start the three processes.
+# Start the web server and the worker.
 gunicorn -c ./gunicorn.conf.py InvenTree.wsgi \
   -b "${INVENTREE_WEB_ADDR}:${INVENTREE_WEB_PORT}" \
   --chdir "${INVENTREE_BACKEND_DIR}/InvenTree" &
@@ -94,8 +98,24 @@ web_pid=$!
 invoke worker &
 worker_pid=$!
 
+# Wait until gunicorn answers before Caddy takes over the public port.
+for _ in $(seq 1 120); do
+  if curl -fsS -o /dev/null -H "Host: ${INVENTREE_SITE_HOST}" \
+      "http://${INVENTREE_WEB_ADDR}:${INVENTREE_WEB_PORT}/api/system/health/"; then
+    break
+  fi
+  kill -0 "$web_pid" 2>/dev/null || break
+  sleep 1
+done
+
+if [[ -n "$setup_pid" ]]; then
+  kill -TERM "$setup_pid" 2>/dev/null || true
+  wait "$setup_pid" 2>/dev/null || true
+fi
+
 caddy run --adapter caddyfile --config /etc/inventree-railway/Caddyfile &
 caddy_pid=$!
+echo "InvenTree ${version} is up on port ${PORT}."
 
 term() {
   kill -TERM "$web_pid" "$worker_pid" "$caddy_pid" 2>/dev/null || true
