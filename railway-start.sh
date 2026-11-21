@@ -31,6 +31,12 @@ export INVENTREE_SITE_HOST="${site_host%%:*}"
 
 cd "${INVENTREE_HOME:-/home/inventree}"
 
+# While the setup steps below run, a placeholder server answers the health
+# check, so a slow first start (fresh database) never hits Railway's
+# health-check timeout.
+caddy run --adapter caddyfile --config /etc/inventree-railway/Caddyfile.setup &
+setup_pid=$!
+
 echo "InvenTree ${INVENTREE_TEMPLATE_VERSION:-}: waiting for the database..."
 invoke wait
 
@@ -74,6 +80,10 @@ if [[ "$(cat "$marker" 2>/dev/null || true)" != "${INVENTREE_TEMPLATE_VERSION:-u
 else
   echo "Static files already collected for ${INVENTREE_TEMPLATE_VERSION:-unknown}; skipping."
 fi
+
+# Stop the placeholder server before the real one takes the port.
+kill -TERM "$setup_pid" 2>/dev/null || true
+wait "$setup_pid" 2>/dev/null || true
 
 # Start the three processes.
 gunicorn -c ./gunicorn.conf.py InvenTree.wsgi \

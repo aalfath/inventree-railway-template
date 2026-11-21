@@ -1,0 +1,19 @@
+# Used only while the first start runs migrations and collects static files:
+# the health check passes, every other page says InvenTree is starting.
+{
+	admin off
+	auto_https off
+	persist_config off
+}
+
+:{$PORT:8080} {
+	handle /api/system/health/ {
+		header Content-Type application/json
+		respond `{"status": "starting"}` 200
+	}
+
+	handle {
+		header Retry-After 30
+		respond "InvenTree is starting (database migrations on first start can take a few minutes). Reload this page shortly." 503
+	}
+}
